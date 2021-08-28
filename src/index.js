@@ -1,25 +1,17 @@
 require('dotenv').config()
 
 const tmi = require('tmi.js')
-const API = require('./api')
+const twitchAPI = require('./api')
 const { db } = require('./db')
 const moment = require('moment')
-const api = API()
+const errorHandler = require('./axios-error-handling')
 
 const sleep = require('util').promisify(setTimeout)
 
 const ONE_SECOND = 1000
 const TEN_SECONDS = ONE_SECOND * 10
 
-// eslint-disable-next-line new-cap
 const client = new tmi.client({
-  connection: {
-    reconnect: true
-  },
-  identity: {
-    username: process.env.BOT_USERNAME,
-    password: process.env.OAUTH_TOKEN
-  },
   channels: [
     process.env.CHANNEL_NAME
   ]
@@ -35,7 +27,7 @@ let newMessages = []
 const games = []
 let analyzeDataIntervalID = null
 
-function clearGlobals () {
+function clearGlobals() {
   streamDocRef = null
   stream = null
   startedAt = null
@@ -48,10 +40,9 @@ client.on('message', onMessageHandler)
 client.connect()
 
 // Format stream data from twitch api
-async function getStreamData () {
+async function getStreamData() {
   try {
-    const twitchAPI = await api()
-    const response = await twitchAPI.get(`streams?user_login=${process.env.USER_LOGIN}`)
+    const response = await twitchAPI.get(`streams?user_id=${process.env.USER_ID}`)
     const stream = response.data.data[0]
 
     if (!stream) return false
@@ -80,15 +71,15 @@ async function getStreamData () {
       video: video
     }
   } catch (error) {
-    console.error('Failed to get stream:', error)
+    console.error('Failed to get stream')
+    errorHandler(error)
   }
 }
 
 // Format video data from twitch api
-async function getVideoData (id) {
+async function getVideoData() {
   try {
-    const query = id ? `videos?id=${id}` : `videos?user_id=${process.env.USER_ID}`
-    const twitchAPI = await api()
+    const query = `videos?user_id=${process.env.USER_ID}`
     const response = await twitchAPI.get(query)
     const video = response.data.data[0]
 
@@ -107,13 +98,13 @@ async function getVideoData (id) {
       duration: video.duration
     }
   } catch (error) {
-    console.error('Failed to get VOD:', error.response.data.message)
+    console.error('Failed to get VOD')
+    errorHandler(error)
   }
 }
 
-async function getGameData (gameID) {
+async function getGameData(gameID) {
   try {
-    const twitchAPI = await api()
     const response = await twitchAPI.get(`games?id=${gameID}`)
     const game = response.data.data[0]
 
@@ -125,11 +116,12 @@ async function getGameData (gameID) {
       boxArtURL: game.box_art_url
     }
   } catch (error) {
-    console.error('Failed to get game:', error.response.data.message)
+    console.error('Failed to get game')
+    errorHandler(error)
   }
 }
 
-async function update () {
+async function update() {
   try {
     const streamTemp = await getStreamData()
 
@@ -140,7 +132,8 @@ async function update () {
 
     stream = streamTemp
   } catch (error) {
-    console.error('Failed to update stream:', error)
+    console.error('Failed to update stream')
+    errorHandler(error)
   }
 
   if (stream && !streamDocRef) {
@@ -168,23 +161,20 @@ async function update () {
   }
 }
 
-async function endOfStream () {
+async function endOfStream() {
   try {
     console.log('Stream over, final analysis')
     const localStreamDocRef = streamDocRef
-    const streamDoc = await streamDocRef.get()
-    const streamData = streamDoc.data()
-    const videoID = streamData.video.id
     const streamStartedAt = moment(startedAt)
     const streamUpTime = moment().diff(streamStartedAt, 'minutes')
     clearGlobals()
 
     await localStreamDocRef.set({ type: 'offline', streamUpTime }, { merge: true })
 
-    let video = await getVideoData(videoID)
+    let video = await getVideoData()
     while (!video.thumbnailURL) {
       await sleep(2000)
-      video = await getVideoData(videoID)
+      video = await getVideoData()
     }
 
     await localStreamDocRef.set({ video }, { merge: true })
@@ -194,24 +184,28 @@ async function endOfStream () {
   }
 }
 
-async function onMessageHandler (target, context, message, self) {
+async function onMessageHandler(target, context, message, self) {
   if (self || !streamDocRef) return
 
-  const score = message.match(/(?<=^|\s)[+-]2(?=$|\s)/g)
+  const plus2Emote = 'jermaPlus2'
+  const minus2Emote = 'jermaMinus2'
+
+  const score = message.match(/(?<=^|\s)[+-]2(?=$|\s)/g) || message.includes(plus2Emote) || message.includes(minus2Emote)
 
   if (!score) return
 
-  context.joke = score.includes('+2')
+  context.joke = score.includes('+2') || score.includes(plus2Emote)
   context.msg = message
 
   newMessages.push(context)
 }
 
-async function analyzeData () {
+async function analyzeData() {
   // Check if any new messages have been recorded
   if (newMessages.length <= 0) return
   messages.push(...newMessages)
   const before = newMessages.length
+
   // Batch write new messages to the database
   const batch = db.batch()
   newMessages.forEach(msg => {
